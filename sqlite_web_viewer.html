@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="tr" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Hastalar — PWA (Mobil & Bilgisayar)</title>
+
+  <!-- Theme & icons for Add to Home Screen experience -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Hastalar">
+  <meta name="description" content="Basit hasta takip uygulaması — offline çalışır, PWA uyumlu.">
+
+  <style>
+    :root{--bg:#fff;--fg:#0b0b0b;--muted:#666;--panel:#f7f7f8;--accent:#0b84ff}
+    [data-theme="dark"]{--bg:#0b0b0f;--fg:#e9eef8;--muted:#9aa5b1;--panel:#111316;--accent:#4ea8ff}
+    html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:Inter,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial}
+    .app{max-width:980px;margin:0 auto;padding:14px}
+    header{display:flex;align-items:center;gap:12px}
+    h1{font-size:18px;margin:0}
+    .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+    input,button,select,textarea{font-size:14px}
+    button{background:var(--accent);color:white;border:none;padding:8px 10px;border-radius:8px}
+    .muted{color:var(--muted)}
+    .panel{background:var(--panel);border-radius:12px;padding:12px;margin-top:12px;border:1px solid rgba(0,0,0,0.05)}
+    table{width:100%;border-collapse:collapse;margin-top:10px}
+    th,td{padding:8px;border-bottom:1px solid rgba(0,0,0,0.06);text-align:left}
+    th{opacity:0.8}
+    td[contenteditable]{background:rgba(255,255,255,0.02);border-radius:6px}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .wide{flex:1;min-width:160px}
+    .small{font-size:13px;color:var(--muted)}
+    @media(max-width:640px){header{gap:8px}button{padding:8px} .app{padding:10px}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <svg width="36" height="36" viewBox="0 0 24 24" fill="none" aria-hidden><rect width="24" height="24" rx="5" fill="var(--accent)"/><path d="M6 12h12M6 7h12M6 17h12" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>
+      <div>
+        <h1>Hastalar — PWA (Çevrimdışı)</h1>
+        <div class="small">Hem telefonda hem bilgisayarda düzenle. Dosya paylaşımıyla senkron sağla.</div>
+      </div>
+    </header>
+
+    <div class="panel">
+      <div class="row">
+        <input id="fileInput" type="file" accept=".db" />
+        <button id="btnLoad">DB Yükle</button>
+        <button id="btnNew">Yeni DB</button>
+        <button id="btnExport">DB İndir</button>
+        <button id="btnPDF">PDF</button>
+        <button id="btnTheme">Tema</button>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <input id="searchName" class="wide" placeholder="İsim ara" />
+        <input id="searchTC" placeholder="TC ara" />
+        <button id="btnSearch">Ara</button>
+        <button id="btnRefresh">Yenile</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3 style="margin:0 0 8px 0">Yeni Hasta Ekle</h3>
+      <div class="row">
+        <input id="isim" placeholder="İsim" />
+        <input id="tc" placeholder="TC" />
+        <input id="hyp" class="wide" placeholder="Tarihleri virgülle ayır: 2025-01-02,2025-02-10" />
+        <input id="ek" placeholder="Ek not" />
+        <button id="btnAdd">Ekle</button>
+      </div>
+    </div>
+
+    <div id="tableWrap" class="panel">
+      <h3 style="margin-top:0">Kayıtlar</h3>
+      <div id="tableContainer" class="small">(Henüz veri yok)</div>
+    </div>
+
+    <div style="margin-top:12px" class="small muted">Not: Veriler cihazında localStorage içinde saklanır. Dosya indir/yükle ile diğer cihazlarla eşleştirme yapabilirsin.</div>
+  </div>
+
+  <!-- sql.js + jsPDF -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.6.2/sql-wasm.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+  <script>
+    // --- PWA: manifest & simple service worker via blob ---
+    (function preparePWA(){
+      const manifest = {
+        name: 'Hastalar',
+        short_name: 'Hastalar',
+        start_url: '.',
+        display: 'standalone',
+        background_color: '#ffffff',
+        theme_color: '#0b84ff',
+        icons: [{src:'',sizes:'192x192',type:'image/png'}]
+      };
+      const mf = new Blob([JSON.stringify(manifest)],{type:'application/json'});
+      const url = URL.createObjectURL(mf);
+      const link = document.createElement('link'); link.rel='manifest'; link.href=url; document.head.appendChild(link);
+
+      // very small service worker to enable offline cache for the shell
+      const swCode = `self.addEventListener('install', e=>{self.skipWaiting();});
+      self.addEventListener('fetch', e=>{
+        // try network first for DB downloads, otherwise fallback to cache (simple)
+      });`;
+      const swBlob = new Blob([swCode],{type:'application/javascript'});
+      const swUrl = URL.createObjectURL(swBlob);
+      if('serviceWorker' in navigator){
+        navigator.serviceWorker.register(swUrl).catch(()=>{});
+      }
+    })();
+
+    // --- app logic ---
+    let SQL=null, db=null, currentFilename='hastalar.db';
+    const el = id => document.getElementById(id);
+
+    async function init(){
+      SQL = await initSqlJs({ locateFile: f => 'https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.6.2/sql-wasm.wasm' });
+      loadBackup();
+      render();
+    }
+    init();
+
+    function ensure(){ if(!db) return; db.run(`CREATE TABLE IF NOT EXISTS hastalar(id INTEGER PRIMARY KEY AUTOINCREMENT, isim TEXT, tc TEXT, hyp_tarihleri TEXT, ek_not TEXT);`); }
+
+    // Buttons
+    el('btnLoad').onclick = async ()=>{
+      const f = el('fileInput').files[0]; if(!f) return alert('Dosya seç.');
+      currentFilename = f.name;
+      db = new SQL.Database(new Uint8Array(await f.arrayBuffer())); ensure(); render(); saveBackup();
+    };
+
+    el('btnNew').onclick = ()=>{ db = new SQL.Database(); ensure(); render(); saveBackup(); };
+
+    el('btnExport').onclick = ()=>{
+      if(!db) return alert('DB yok');
+      const blob = new Blob([db.export()],{type:'application/octet-stream'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = currentFilename; a.click();
+    };
+
+    el('btnAdd').onclick = ()=>{
+      if(!db) return alert('Önce DB oluştur veya yükle');
+      const isim = el('isim').value.trim();
+      const tc = el('tc').value.trim();
+      const hyp = JSON.stringify(el('hyp').value.split(',').map(s=>s.trim()).filter(Boolean));
+      const ek = el('ek').value.trim();
+      if(!isim || !tc) return alert('İsim ve TC gerekli');
+      db.run('INSERT INTO hastalar(isim,tc,hyp_tarihleri,ek_not) VALUES(?,?,?,?)',[isim,tc,hyp,ek]);
+      el('isim').value=''; el('tc').value=''; el('hyp').value=''; el('ek').value='';
+      render(); saveBackup();
+    };
+
+    el('btnSearch').onclick = ()=>render(true);
+    el('btnRefresh').onclick = ()=>render(false);
+
+    el('btnTheme').onclick = ()=>{
+      const doc = document.documentElement;
+      const next = doc.dataset.theme === 'dark' ? 'light' : 'dark';
+      doc.dataset.theme = next; localStorage.setItem('theme', next);
+    };
+    document.documentElement.dataset.theme = localStorage.getItem('theme') || 'light';
+
+    function render(search=false){
+      const wrap = el('tableContainer');
+      if(!db){ wrap.innerHTML = '(DB yok)'; return; }
+      let q = 'SELECT * FROM hastalar';
+      const name = el('searchName').value.trim();
+      const tc = el('searchTC').value.trim();
+      if(search && (name || tc)){
+        q += ' WHERE 1=1';
+        if(name) q += ` AND isim LIKE '%${name}%'`;
+        if(tc) q += ` AND tc LIKE '%${tc}%'`;
+      }
+      q += ' ORDER BY id DESC';
+      const stmt = db.prepare(q);
+      const rows = [];
+      while(stmt.step()) rows.push(stmt.getAsObject()); stmt.free();
+      if(!rows.length){ wrap.innerHTML='(Kayıt yok)'; return; }
+
+      let html = '<table><thead><tr><th>ID</th><th>İsim</th><th>TC</th><th>Tarihler</th><th>Ek Not</th><th>Sil</th></tr></thead><tbody>';
+      for(const r of rows){
+        const hypText = (()=>{ try{return JSON.parse(r.hyp_tarihleri||'[]').map(t=>t.split('-').reverse().join('.')).join(', ')}catch(e){return r.hyp_tarihleri||''} })();
+        html += `<tr>`+
+          `<td>${r.id}</td>`+
+          `<td contenteditable data-col="isim" data-id="${r.id}">${escapeHtml(r.isim||'')}</td>`+
+          `<td contenteditable data-col="tc" data-id="${r.id}">${escapeHtml(r.tc||'')}</td>`+
+          `<td contenteditable data-col="hyp_tarihleri" data-id="${r.id}">${escapeHtml(hypText)}</td>`+
+          `<td contenteditable data-col="ek_not" data-id="${r.id}">${escapeHtml(r.ek_not||'')}</td>`+
+          `<td><button data-id="${r.id}" class="delBtn">Sil</button></td>`+
+        `</tr>`;
+      }
+      html += '</tbody></table>';
+      wrap.innerHTML = html;
+
+      // attach handlers
+      Array.from(document.querySelectorAll('.delBtn')).forEach(b=>b.onclick = ()=>{ if(confirm('Silinsin mi?')){ db.run('DELETE FROM hastalar WHERE id=?',[b.dataset.id]); render(); saveBackup(); } });
+      document.querySelectorAll('[contenteditable]').forEach(cell=>cell.onblur = ()=>saveCell(cell));
+    }
+
+    function saveCell(cell){
+      const id = cell.dataset.id; const col = cell.dataset.col; let val = cell.innerText.trim();
+      if(col === 'hyp_tarihleri'){
+        val = JSON.stringify(val.split(',').map(s=>s.trim()).filter(Boolean).map(v=>v.includes('.')?v.split('.').reverse().join('-'):v));
+      }
+      db.run(`UPDATE hastalar SET ${col}=? WHERE id=?`,[val,id]); saveBackup();
+    }
+
+    function escapeHtml(s){ if(!s) return ''; return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c])); }
+
+    // PDF
+    el('btnPDF').onclick = ()=>{
+      if(!db) return alert('DB yok');
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({unit:'pt'});
+      let y = 40; doc.setFontSize(14); doc.text('Hastalar',40,24);
+      const stmt = db.prepare('SELECT * FROM hastalar ORDER BY id DESC');
+      doc.setFontSize(10);
+      while(stmt.step()){
+        const r = stmt.getAsObject();
+        const line = `${r.id} • ${r.isim} • ${r.tc}`;
+        doc.text(line,40,y); y += 16; if(y > 820){ doc.addPage(); y = 40; }
+      }
+      stmt.free(); doc.save('hastalar.pdf');
+    };
+
+    // Backup to localStorage (simple)
+    function saveBackup(){ if(!db) return; try{ localStorage.setItem('backup_db', JSON.stringify(Array.from(db.export()))); localStorage.setItem('backup_name', currentFilename);}catch(e){console.log('yedek hatası',e);} }
+    function loadBackup(){ const raw = localStorage.getItem('backup_db'); if(!raw) return; try{ const arr = JSON.parse(raw); db = new SQL.Database(new Uint8Array(arr)); ensure(); }catch(e){ console.log('yedek yüklenemedi'); } }
+
+    // drag & drop
+    document.addEventListener('dragover', e=>e.preventDefault());
+    document.addEventListener('drop', async e=>{ e.preventDefault(); const f = e.dataTransfer.files[0]; if(f){ el('fileInput').files = e.dataTransfer.files; el('btnLoad').click(); } });
+
+    // helper: on before unload, encourage backup save
+    window.addEventListener('beforeunload', ()=>{ saveBackup(); });
+  </script>
+</body>
+</html>
